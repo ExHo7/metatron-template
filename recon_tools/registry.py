@@ -72,13 +72,18 @@ def make_runner(spec: ToolSpec):
     """
     Return a callable run(target) -> str for a spec.
     Simple tools get a generic runner that builds argv and calls run_tool;
-    custom tools return their own runner.
+    custom tools wrap their own runner. In both cases spec.target_transform
+    (if set) normalizes the target first (e.g. URL -> bare domain).
     """
+    transform = spec.target_transform or (lambda t: t)
+
     if spec.is_custom:
-        return spec.runner
+        def _run_custom(target: str) -> str:
+            return spec.runner(transform(target))
+        return _run_custom
 
     def _run(target: str) -> str:
-        command = spec.build_command(target)
+        command = spec.build_command(transform(target))
         print(f"  [*] {' '.join(command)}")
         return run_tool(command, timeout=spec.timeout)
 

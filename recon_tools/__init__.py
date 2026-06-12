@@ -26,11 +26,13 @@ from .registry import (
     available_tools_text,
 )
 from .loader import load_plugins
+from .normalize import to_domain
 
 __all__ = [
     "ToolSpec",
     "recon_tool",
     "TARGET_TYPES",
+    "to_domain",
     "REGISTRY",
     "register",
     "run_tool",

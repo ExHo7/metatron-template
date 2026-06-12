@@ -31,6 +31,11 @@ A) SIMPLE TOOL  — one command, the target slots into the args.
         target_type="domain",          # ip | domain | url | any
         install="sudo apt install mytool",
         description="what this tool does, one line (shown to the LLM)",
+        # Optional: normalize the target before the run. to_domain strips
+        # scheme/path/port so a URL becomes a bare domain (handy for tools that
+        # only accept a domain, e.g. subfinder, gau):
+        #   from recon_tools import to_domain
+        #   target_transform=to_domain,
     )
     def mytool():
         # Empty body — the decorator builds a generic runner from `args`.

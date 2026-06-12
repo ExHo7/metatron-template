@@ -38,6 +38,7 @@ class ToolSpec:
     binary: str                                 # executable — drives allowlist + FileNotFound hint
     args: Optional[list] = None                 # arg template, e.g. ["-sV", "--open", "{target}"]
     runner: Optional[Callable[[str], str]] = None   # custom runner(target) -> str
+    target_transform: Optional[Callable[[str], str]] = None  # normalize target before run (e.g. to_domain)
     timeout: int = 120                          # seconds before run_tool kills it
     default_recon: bool = True                  # included in "Run all (default)"
     category: str = "general"                   # network | web | dns | subdomain | url | general
