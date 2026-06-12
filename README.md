@@ -28,7 +28,8 @@ You give it a target IP or domain. It runs real recon tools (nmap, whois, whatwe
 ## ✨ Features
 
 - 🤖 **Local AI Analysis** — powered by `metatron-qwen` via Ollama, runs 100% offline
-- 🔍 **Automated Recon** — nmap, whois, whatweb, curl headers, dig DNS, nikto
+- 🔍 **Automated Recon** — nmap, whois, whatweb, curl headers, dig DNS, nikto, subfinder, katana, gau
+- 🧩 **Pluggable Tools** — add a recon tool by dropping one file in `recon_tools/plugins/` (see *Adding a Tool*)
 - 🌐 **Web Search** — DuckDuckGo search + CVE lookup (no API key needed)
 - 🗄️ **MariaDB Backend** — full scan history with 5 linked tables
 - ✏️ **Edit / Delete** — modify any saved result directly from the CLI
@@ -107,6 +108,22 @@ pip install -r requirements.txt
 ```bash
 sudo apt install nmap whois whatweb curl dnsutils nikto
 ```
+
+### 5. (Optional) Install the Go recon tools
+
+`subfinder`, `katana` and `gau` are Go binaries from the ProjectDiscovery /
+recon ecosystem. Install Go, then:
+
+```bash
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+go install github.com/lc/gau/v2/cmd/gau@latest
+# make sure ~/go/bin is on your PATH
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+If a tool isn't installed, METATRON won't crash — it returns an install hint
+when you try to run it.
 
 ---
 
@@ -302,7 +319,15 @@ or
 METATRON/
 ├── metatron.py       ← main CLI entry point
 ├── db.py             ← MariaDB connection and all CRUD operations
-├── tools.py          ← recon tool runners (nmap, whois, etc.)
+├── tools.py          ← thin layer: derives menu/allowlist from the registry
+├── recon_tools/      ← tool template system (see below)
+│   ├── spec.py       ← ToolSpec dataclass + @recon_tool decorator
+│   ├── registry.py   ← REGISTRY + run_tool + derivations
+│   ├── loader.py     ← auto-discovers plugins/
+│   └── plugins/      ← one file per tool (drop a file = add a tool)
+│       ├── _template.py   ← copy this to add a tool
+│       ├── nmap.py, whois.py, whatweb.py, curl_headers.py, dig.py, nikto.py
+│       └── subfinder.py, katana.py, gau.py
 ├── llm.py            ← Ollama interface and AI tool dispatch loop
 ├── search.py         ← DuckDuckGo web search and CVE lookup
 ├── Modelfile         ← custom model config for metatron-qwen
@@ -312,6 +337,71 @@ METATRON/
 ├── README.md         ← this file
 └── screenshots/      ← terminal screenshots for documentation
 ```
+
+---
+
+## 🧩 Adding a Tool
+
+Tools are declared, not wired. The menu, the LLM allowlist, the default-recon
+set and the tool list shown to the model are all **derived** from the registry —
+so adding a tool means adding one file.
+
+### 1. Copy the template
+
+```bash
+cp recon_tools/plugins/_template.py recon_tools/plugins/httpx.py
+```
+
+### 2. Declare the tool
+
+**Simple tool** (one command, target slots into the args):
+
+```python
+from recon_tools import recon_tool
+
+@recon_tool(
+    name="httpx",
+    binary="httpx",
+    args=["-silent", "-u", "{target}"],   # {target} is substituted at run time
+    category="web",
+    target_type="url",
+    default_recon=False,                   # show in menu, skip "Run all"
+    install="go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+    description="probe live hosts / HTTP servers",
+)
+def httpx():
+    pass
+```
+
+**Custom tool** (several commands / aggregated output) — decorate a runner that
+takes `target` and returns a string:
+
+```python
+from recon_tools import recon_tool, run_tool
+
+@recon_tool(name="dig", binary="dig", category="dns", target_type="domain")
+def dig(target):
+    a  = run_tool(["dig", "+short", "A",  target], timeout=15)
+    mx = run_tool(["dig", "+short", "MX", target], timeout=15)
+    return f"[A]\n{a}\n\n[MX]\n{mx}"
+```
+
+That's it. Restart METATRON — the new tool appears in the menu, is allowlisted
+for LLM `[TOOL:]` dispatch, and is advertised to the model. No edits to
+`tools.py`, `llm.py`, or anywhere else.
+
+| Field | Meaning |
+|-------|---------|
+| `name` | display name / logical key |
+| `binary` | executable on PATH (also the allowlist entry) |
+| `args` | argv template with `{target}` (simple tools only) |
+| `runner` | custom `run(target)->str` (set implicitly by decorating a function with a `target` arg) |
+| `timeout` | seconds before the run is killed |
+| `default_recon` | include in the "Run all default" pipeline |
+| `category` | `network` / `web` / `dns` / `subdomain` / `url` / `general` |
+| `target_type` | `ip` / `domain` / `url` / `any` — filters default recon by target |
+| `install` | hint shown if the binary is missing |
+| `description` | one-liner surfaced to the LLM |
 
 ---
 

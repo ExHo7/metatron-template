@@ -9,7 +9,7 @@ Model: metatron-qwen (fine-tuned from huihui_ai/qwen3.5-abliterated:9b)
 import re
 import requests
 import json
-from tools import run_tool_by_command, run_nmap, run_curl_headers
+from tools import run_tool_by_command, available_tools_text
 from search import handle_search_dispatch
 
 OLLAMA_URL  = "http://localhost:11434/api/chat"
@@ -29,6 +29,9 @@ You have access to real tools. To use them, write tags in your response:
 
   [TOOL: nmap -sV 192.168.1.1]       → runs nmap or any CLI tool
   [SEARCH: CVE-2021-44228 exploit]   → searches the web via DuckDuckGo
+
+Available recon tools (use exact binary name inside [TOOL:]):
+{{TOOLS}}
 
 Rules:
 - Always analyze scan data thoroughly before suggesting exploits
@@ -62,6 +65,10 @@ IMPORTANT RULES FOR ACCURACY:
 - ab and stress tools are not Slowloris unless confirmed
 - Only assign CRITICAL if there is direct evidence of exploitability
 - If evidence is weak mark severity as LOW with note: unconfirmed"""
+
+# Inject the live tool catalogue (derived from recon_tools registry) so the
+# model knows which tools it can dispatch via [TOOL: ...].
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{TOOLS}}", available_tools_text())
 
 
 # ─────────────────────────────────────────────

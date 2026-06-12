@@ -1,166 +1,76 @@
 #!/usr/bin/env python3
 """
 METATRON - tools.py
-Recon tool runners — all output returned as strings to feed into the LLM.
-Tools used: nmap, whois, whatweb, curl, dig, nikto
-OS: Parrot OS (all these tools are pre-installed or easily available)
+Thin layer over the recon_tools registry.
+
+All tool wiring (which tools exist, their args, timeouts, allowlist, default
+recon) now lives in recon_tools/plugins/*. This module only DERIVES the
+runtime structures the rest of METATRON consumes and keeps the original public
+API stable (run_default_recon, interactive_tool_run, format_recon_for_llm,
+run_single_tool, run_tool_by_command).
+
+Add a tool: copy recon_tools/plugins/_template.py to plugins/<tool>.py.
 """
 
-import subprocess
+import re
+
+from recon_tools import (
+    load_plugins,
+    REGISTRY,
+    run_tool,                 # re-exported base runner (back-compat)
+    build_menu,
+    allowed_binaries,
+    default_recon_specs,
+    make_runner,
+    available_tools_text,
+)
+
+# Populate the registry from plugins, then derive runtime structures.
+load_plugins()
+
+# {menu_key: (display_name, runner)} — numbered 1..N in plugin order.
+TOOLS_MENU = build_menu()
+
+# Allowlist for LLM [TOOL: ...] dispatch — auto-derived from registered binaries.
+ALLOWED_TOOLS = allowed_binaries()
 
 
 # ─────────────────────────────────────────────
-# BASE RUNNER
+# TARGET TYPE DETECTION
 # ─────────────────────────────────────────────
 
-def run_tool(command: list, timeout: int = 120) -> str:
-    """
-    Execute a shell command, return combined stdout + stderr as string.
-    Never crashes the program — always returns something.
-    """
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        output = result.stdout.strip()
-        errors = result.stderr.strip()
+_IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
-        if output and errors:
-            return output + "\n[STDERR]\n" + errors
-        elif output:
-            return output
-        elif errors:
-            return errors
-        else:
-            return "[!] Tool returned no output."
 
-    except subprocess.TimeoutExpired:
-        return f"[!] Timed out after {timeout}s: {' '.join(command)}"
-    except FileNotFoundError:
-        return f"[!] Tool not found: {command[0]} — install it with: sudo apt install {command[0]}"
-    except Exception as e:
-        return f"[!] Unexpected error running {command[0]}: {e}"
+def detect_target_type(target: str) -> str:
+    """Best-effort classify a target as ip | url | domain."""
+    t = target.strip()
+    if _IPV4_RE.match(t):
+        return "ip"
+    if t.startswith(("http://", "https://")):
+        return "url"
+    return "domain"
 
 
 # ─────────────────────────────────────────────
-# INDIVIDUAL TOOLS
+# RECON PIPELINE
 # ─────────────────────────────────────────────
-
-def run_nmap(target: str) -> str:
-    """
-    nmap -sV -sC -T4 --open
-    -sV  : detect service versions
-    -sC  : run default scripts (basic vuln checks)
-    -T4  : aggressive timing (faster)
-    --open : only show open ports
-    """
-    print(f"  [*] nmap -sV -sC -T4 --open {target}")
-    return run_tool(["nmap", "-sV", "-sC", "-T4", "--open", target], timeout=180)
-
-
-def run_whois(target: str) -> str:
-    """
-    whois — domain registration, registrar, IP ownership info
-    """
-    print(f"  [*] whois {target}")
-    return run_tool(["whois", target], timeout=30)
-
-
-def run_whatweb(target: str) -> str:
-    """
-    whatweb -a 3 — fingerprint web technologies, CMS, frameworks, headers
-    -a 3 : aggression level 3 (active but not destructive)
-    """
-    print(f"  [*] whatweb -a 3 {target}")
-    return run_tool(["whatweb", "-a", "3", target], timeout=60)
-
-
-def run_curl_headers(target: str) -> str:
-    """
-    curl -sI — fetch HTTP headers only
-    Reveals: server software, X-Powered-By, cookies, security headers (or lack of them)
-    """
-    print(f"  [*] curl -sI http://{target}")
-    output = run_tool([
-        "curl", "-sI",
-        "--max-time", "10",
-        "--location",          # follow redirects
-        f"http://{target}"
-    ], timeout=20)
-
-    # also try https
-    https_output = run_tool([
-        "curl", "-sI",
-        "--max-time", "10",
-        "--location",
-        "-k",                  # ignore cert errors
-        f"https://{target}"
-    ], timeout=20)
-
-    return f"[HTTP Headers]\n{output}\n\n[HTTPS Headers]\n{https_output}"
-
-
-def run_dig(target: str) -> str:
-    """
-    dig — DNS records: A, MX, NS, TXT
-    Useful for subdomains, mail servers, SPF/DKIM info
-    """
-    print(f"  [*] dig {target} ANY")
-    a_record  = run_tool(["dig", "+short", "A",   target], timeout=15)
-    mx_record = run_tool(["dig", "+short", "MX",  target], timeout=15)
-    ns_record = run_tool(["dig", "+short", "NS",  target], timeout=15)
-    txt_record= run_tool(["dig", "+short", "TXT", target], timeout=15)
-
-    return (
-        f"[A Records]\n{a_record}\n\n"
-        f"[MX Records]\n{mx_record}\n\n"
-        f"[NS Records]\n{ns_record}\n\n"
-        f"[TXT Records]\n{txt_record}"
-    )
-
-
-def run_nikto(target: str) -> str:
-    """
-    nikto -h — web server vulnerability scanner
-    Checks for outdated software, dangerous files, misconfigurations
-    WARNING: noisy tool, only run with permission
-    """
-    print(f"  [*] nikto -h {target}  (this may take a while...)")
-    return run_tool(["nikto", "-h", target, "-nointeractive"], timeout=300)
-
-
-# ─────────────────────────────────────────────
-# MAIN RECON PIPELINE
-# ─────────────────────────────────────────────
-
-TOOLS_MENU = {
-    "1": ("nmap",         run_nmap),
-    "2": ("whois",        run_whois),
-    "3": ("whatweb",      run_whatweb),
-    "4": ("curl headers", run_curl_headers),
-    "5": ("dig DNS",      run_dig),
-    "6": ("nikto",        run_nikto),
-}
-
 
 def run_default_recon(target: str) -> dict:
     """
-    Run the standard recon pipeline (everything except nikto).
-    Returns a dict of {tool_name: output_string}.
-    Nikto is excluded by default — too slow/noisy for auto-run.
+    Run the default recon pipeline (specs with default_recon=True that are
+    compatible with the target type). Returns {tool_name: output_string}.
     """
-    print(f"\n[*] Starting recon on: {target}")
+    ttype = detect_target_type(target)
+    specs = default_recon_specs(target_type=ttype)
+
+    print(f"\n[*] Starting recon on: {target}  (type: {ttype})")
     print("─" * 50)
 
     results = {}
-    results["nmap"]         = run_nmap(target)
-    results["whois"]        = run_whois(target)
-    results["whatweb"]      = run_whatweb(target)
-    results["curl_headers"] = run_curl_headers(target)
-    results["dig"]          = run_dig(target)
+    for spec in specs:
+        runner = make_runner(spec)
+        results[spec.name] = runner(target)
 
     print("─" * 50)
     print("[+] Recon complete.\n")
@@ -168,7 +78,7 @@ def run_default_recon(target: str) -> dict:
 
 
 def run_single_tool(tool_key: str, target: str) -> str:
-    """Run one tool by its menu key. Used by AI tool dispatch."""
+    """Run one tool by its menu key. Used by AI tool dispatch / manual select."""
     if tool_key in TOOLS_MENU:
         name, func = TOOLS_MENU[tool_key]
         return func(target)
@@ -176,10 +86,7 @@ def run_single_tool(tool_key: str, target: str) -> str:
 
 
 def format_recon_for_llm(results: dict) -> str:
-    """
-    Flatten the recon results dict into one clean string
-    to paste into the LLM prompt.
-    """
+    """Flatten the recon results dict into one clean string for the LLM prompt."""
     output = ""
     for tool, data in results.items():
         output += f"\n{'='*50}\n"
@@ -189,34 +96,40 @@ def format_recon_for_llm(results: dict) -> str:
     return output
 
 
-ALLOWED_TOOLS = {"nmap", "whois", "whatweb", "curl", "dig", "nikto"}
-
 def run_tool_by_command(command_str: str) -> str:
+    """
+    Execute a raw command string from the LLM ([TOOL: ...]) — allowlist only.
+    The allowlist is derived from the registered tools' binaries.
+    """
     parts = command_str.strip().split()
     if not parts:
         return "[!] Empty command."
-    
-    # allowlist only — reject anything not in the list
-    tool = parts[0].lower().split("/")[-1]  # handles /bin/nmap etc
+
+    tool = parts[0].lower().split("/")[-1]  # handles /usr/bin/nmap etc.
     if tool not in ALLOWED_TOOLS:
-        return f"[!] Tool '{parts[0]}' is not permitted. Allowed: {ALLOWED_TOOLS}"
-    
+        return f"[!] Tool '{parts[0]}' is not permitted. Allowed: {sorted(ALLOWED_TOOLS)}"
+
     return run_tool(parts)
+
 
 # ─────────────────────────────────────────────
 # INTERACTIVE TOOL SELECTOR (called from CLI)
 # ─────────────────────────────────────────────
 
 def interactive_tool_run(target: str) -> str:
-    """
-    Let user manually pick which tools to run.
-    Returns combined output string.
-    """
+    """Let the user manually pick which tools to run. Returns combined output."""
+    ttype = detect_target_type(target)
+
     print("\n[ SELECT TOOLS TO RUN ]")
     for key, (name, _) in TOOLS_MENU.items():
-        print(f"  [{key}] {name}")
-    print("  [a] Run all (except nikto)")
-    print("  [n] Run all + nikto (slow)")
+        spec = REGISTRY.get(name)
+        tag = ""
+        if spec:
+            flag = "default" if spec.default_recon else "opt-in"
+            tag = f"  ({spec.category}/{spec.target_type}, {flag})"
+        print(f"  [{key}] {name}{tag}")
+    print("  [a] Run all default (target-compatible)")
+    print("  [n] Run everything (incl. opt-in: nikto, katana, gau...)")
 
     choice = input("\nChoice(s) e.g. 1 2 4 or a: ").strip().lower()
 
@@ -225,9 +138,11 @@ def interactive_tool_run(target: str) -> str:
         return format_recon_for_llm(results)
 
     if choice == "n":
-        results = run_default_recon(target)
-        results["nikto"] = run_nikto(target)
-        return format_recon_for_llm(results)
+        combined = {}
+        for key, (name, func) in TOOLS_MENU.items():
+            print(f"\n[*] Running {name}...")
+            combined[name] = func(target)
+        return format_recon_for_llm(combined)
 
     combined = {}
     for key in choice.split():
@@ -246,6 +161,9 @@ def interactive_tool_run(target: str) -> str:
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    print("[ Registered tools ]")
+    print(available_tools_text())
+    print()
     target = input("Enter test target (IP or domain): ").strip()
     results = run_default_recon(target)
     print(format_recon_for_llm(results))
