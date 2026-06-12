@@ -289,14 +289,32 @@ def parse_exploits(response: str) -> list:
 
 
 def parse_risk_level(response: str) -> str:
-    """Extract RISK_LEVEL from AI response."""
-    match = re.search(r'RISK_LEVEL:\s*(CRITICAL|HIGH|MEDIUM|LOW)', response, re.IGNORECASE)
-    return match.group(1).upper() if match else "UNKNOWN"
+    """Extract the LAST RISK_LEVEL from AI response (most recent verdict wins)."""
+    matches = re.findall(r'RISK_LEVEL:\s*(CRITICAL|HIGH|MEDIUM|LOW)', response, re.IGNORECASE)
+    return matches[-1].upper() if matches else "UNKNOWN"
 
 
 def parse_summary(response: str) -> str:
-    match = re.search(r'SUMMARY:\s*(.+)', response, re.IGNORECASE)
-    return match.group(1).strip() if match else ""
+    matches = re.findall(r'SUMMARY:\s*(.+)', response, re.IGNORECASE)
+    return matches[-1].strip() if matches else ""
+
+
+def _dedup_by(items: list, key: str) -> list:
+    """Keep first occurrence per key (case-insensitive) — vulns/exploits can
+    repeat across analysis rounds when we parse the whole transcript."""
+    seen = set()
+    out = []
+    for it in items:
+        k = it.get(key, "").strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(it)
+    return out
+
+
+def _is_error_response(response: str) -> bool:
+    """ask_ollama returns '[!] ...' sentinels on errors / empty output."""
+    return (not response.strip()) or response.startswith("[!]")
 
 
 # ─────────────────────────────────────────────
@@ -321,21 +339,30 @@ List all vulnerabilities, fixes, and suggest exploits where applicable."""
         }
     ]
 
-    final_response = ""
+    transcript = []   # every non-error model response, in order
+    last_raw = ""     # last raw response (even an error) — fallback for display
 
     for loop in range(MAX_TOOL_LOOPS):
         response = ask_ollama(messages)
+        last_raw = response
 
         print(f"\n{'─'*60}")
         print(f"[METATRON - Round {loop + 1}]")
         print(f"{'─'*60}")
         print(response)
 
-        final_response = response
+        is_error = _is_error_response(response)
+        if not is_error:
+            transcript.append(response)
 
-        tool_calls = extract_tool_calls(response)
+        # An empty/error response yields no tool calls and must NOT wipe the
+        # analysis collected in earlier rounds — stop and keep what we have.
+        tool_calls = [] if is_error else extract_tool_calls(response)
         if not tool_calls:
-            print("\n[*] No tool calls. Analysis complete.")
+            if is_error:
+                print("\n[!] Empty/error response — stopping, keeping earlier analysis.")
+            else:
+                print("\n[*] No tool calls. Analysis complete.")
             break
 
         tool_results = run_tool_calls(tool_calls)
@@ -354,15 +381,20 @@ Continue your analysis with this new information.
 If analysis is complete, give the final RISK_LEVEL and SUMMARY."""
         })
 
-    vulnerabilities = parse_vulnerabilities(final_response)
-    exploits        = parse_exploits(final_response)
-    risk_level      = parse_risk_level(final_response)
-    summary         = parse_summary(final_response)
+    # Parse across ALL rounds, not just the last — the model often stops
+    # re-listing earlier findings (or returns empty) on the final turn.
+    full_text = "\n\n".join(transcript)
+    vulnerabilities = _dedup_by(parse_vulnerabilities(full_text), "vuln_name")
+    exploits        = _dedup_by(parse_exploits(full_text), "exploit_name")
+    risk_level      = parse_risk_level(full_text)
+    summary         = parse_summary(full_text)
+
+    full_response = full_text if transcript else last_raw
 
     print(f"\n[+] Parsed: {len(vulnerabilities)} vulns, {len(exploits)} exploits | Risk: {risk_level}")
 
     return {
-        "full_response":   final_response,
+        "full_response":   full_response,
         "vulnerabilities": vulnerabilities,
         "exploits":        exploits,
         "risk_level":      risk_level,
