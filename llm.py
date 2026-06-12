@@ -339,8 +339,9 @@ List all vulnerabilities, fixes, and suggest exploits where applicable."""
         }
     ]
 
-    transcript = []   # every non-error model response, in order
-    last_raw = ""     # last raw response (even an error) — fallback for display
+    transcript = []        # every non-error model response, in order
+    last_raw = ""          # last raw response (even an error) — fallback for display
+    retried_empty = False  # one-shot retry guard for empty/error responses
 
     for loop in range(MAX_TOOL_LOOPS):
         response = ask_ollama(messages)
@@ -354,6 +355,24 @@ List all vulnerabilities, fixes, and suggest exploits where applicable."""
         is_error = _is_error_response(response)
         if not is_error:
             transcript.append(response)
+
+        # The model sometimes goes silent (empty/error) instead of emitting its
+        # final verdict. Nudge it once for a structured wrap-up before giving up.
+        if is_error and not retried_empty:
+            retried_empty = True
+            print("\n[*] Empty response — retrying once for a final verdict...")
+            messages.append({"role": "assistant", "content": "(no output)"})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "You returned nothing. Emit your final analysis NOW as plain "
+                    "text — do not call any tools. Include the VULN: and EXPLOIT: "
+                    "lines you are confident about, then end with:\n"
+                    "RISK_LEVEL: <CRITICAL|HIGH|MEDIUM|LOW>\n"
+                    "SUMMARY: <2-3 sentences>"
+                ),
+            })
+            continue
 
         # An empty/error response yields no tool calls and must NOT wipe the
         # analysis collected in earlier rounds — stop and keep what we have.
